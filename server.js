@@ -1,5 +1,5 @@
 // /api/server.js
-// Versão Final: Usa o método de login da Sala do Futuro e lida com a resposta de CD_ESCOLA: 0.
+// Versão 11.0: Modo Injetor. Recebe um token válido capturado do Taskitos e busca as tarefas.
 
 const express = require('express');
 const axios = require('axios');
@@ -9,67 +9,46 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// ROTA DE LOGIN (Método original da SED)
-app.post('/api/login', async (req, res) => {
-  const { ra, senha } = req.body;
-  if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
-  try {
-    const response = await axios.post('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', 
-      { user: `${ra}SP`, senha },
-      { headers: { 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a' } }
-    );
-    res.status(200).json(response.data);
-  } catch (error) {
-    res.status(error.response?.status || 500).json({ error: 'Falha no login', details: error.response?.data });
-  }
-});
-
-// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
-app.post('/api/get-all-data', async (req, res) => {
-    const { token, loginData } = req.body;
-    if (!token || !loginData) {
-        return res.status(400).json({ error: 'Dados de login são necessários.' });
-    }
-    
-    const codigoAluno = loginData.DadosUsuario.CD_USUARIO;
-    // Pega o código da escola, mesmo que seja 0.
-    const codigoEscola = loginData.DadosUsuario.PERFIS[0]?.CD_ESCOLA;
-
-    if (codigoEscola === undefined) {
-        return res.status(400).json({ error: 'Não foi possível encontrar o perfil do aluno nos dados de login.' });
+// ROTA ÚNICA PARA BUSCAR TAREFAS COM UM TOKEN CAPTURADO
+app.post('/api/get-tasks-with-key', async (req, res) => {
+    const { token } = req.body;
+    if (!token) {
+        return res.status(400).json({ error: 'O token (x-api-key) capturado é necessário.' });
     }
 
-    const authHeader = { 'Authorization': `Bearer ${token}` };
+    // Estes são os cabeçalhos que o Taskitos usa, mas a chave é o token.
+    const headers = {
+        'x-api-key': token,
+        'x-client-domain': 'taskitos.cupiditys.lol',
+        'origin': 'https://taskitos.cupiditys.lol',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+    };
 
     try {
-        const anoLetivo = new Date().getFullYear();
-        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${codigoEscola}`;
+        // --- PASSO 1: Obter a lista de "salas" (turmas) do usuário ---
+        console.log("[INJETOR] Passo 1: Buscando salas com o token injetado...");
+        const roomsResponse = await axios.get('https://edusp-api.ip.tv/room/user', { headers });
         
-        const turmasResponse = await axios.get(turmasUrl, {
-            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
-        });
-
-        // Mesmo que a busca não retorne turmas, continuamos para buscar o resto.
-        const turmas = turmasResponse.data.data || [];
-        
-        let notificacoes = [], avisos = [];
-        if (turmas.length > 0) {
-            const primeiraTurmaId = turmas[0].codigo;
-            const [notificacoesRes, avisosRes] = await Promise.all([
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
-            ]);
-            notificacoes = notificacoesRes.data;
-            avisos = avisosRes.data;
+        const rooms = roomsResponse.data.items;
+        if (!rooms || rooms.length === 0) {
+            console.log("[INJETOR] Nenhuma sala encontrada.");
+            return res.status(200).json({ items: [] });
         }
+        console.log(`[INJETOR] Encontradas ${rooms.length} salas.`);
 
-        res.status(200).json({ turmas, notificacoes, avisos, debug: { sentCodigoEscola: codigoEscola } });
+        // --- PASSO 2: Buscar as tarefas para cada sala ---
+        console.log("[INJETOR] Passo 2: Buscando tarefas...");
+        const publicationTargets = rooms.map(room => `publication_target[]=${room.id}`).join('&');
+        const urlTarefas = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&is_essay=false&is_exam=false&answer_statuses=draft&answer_statuses=pending&with_answer=true&with_apply_moment=true&limit=100&filter_expired=true&offset=0&${publicationTargets}`;
+
+        const tarefasResponse = await axios.get(urlTarefas, { headers });
+
+        console.log("[INJETOR] Sucesso! Tarefas encontradas.");
+        res.status(200).json(tarefasResponse.data);
 
     } catch (error) {
-        res.status(400).json({ 
-            error: 'Falha ao buscar os dados do dashboard.', 
-            details: error.message 
-        });
+        console.error("[INJETOR] Erro no fluxo:", error.response?.data || error.message);
+        res.status(error.response?.status || 500).json({ error: 'Falha ao buscar tarefas com a chave fornecida.', details: error.response?.data });
     }
 });
 
