@@ -1,78 +1,113 @@
-// /api/server.js
-// Versão Final: Usa a informação de CD_ESCOLA diretamente da resposta do login.
-
+// Importa as bibliotecas necessárias
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 
+// Inicializa o aplicativo Express
 const app = express();
-app.use(cors()); 
+const PORT = 3000; // A porta em que nosso servidor irá rodar
+
+// --- Middlewares ---
+// Habilita o CORS para permitir que o frontend acesse este servidor
+app.use(cors());
+// Permite que o servidor entenda requisições com corpo em JSON
 app.use(express.json());
 
-// ROTA DE LOGIN (Inalterada)
-app.post('/api/login', async (req, res) => {
-  const { ra, senha } = req.body;
-  if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
-  try {
-    const response = await axios.post('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', 
-      { user: `${ra}SP`, senha },
-      { headers: { 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a' } }
-    );
-    res.status(200).json(response.data);
-  } catch (error) {
-    res.status(error.response?.status || 500).json({ error: 'Falha no login', details: error.response?.data });
-  }
-});
+// --- Constantes da API da SEDUC ---
+const API_BASE_URL = 'https://sedintegracoes.educacao.sp.gov.br';
+const LOGIN_API_KEY = '2b03c1db3884488795f79c37c069381a';
+const TURMAS_API_KEY = '5936fddda3484fe1aa4436df1bd76dab';
 
-// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
-app.post('/api/get-all-data', async (req, res) => {
-    // Agora recebemos o token, codigoAluno e o codigoEscola do frontend
-    const { token, codigoAluno, codigoEscola } = req.body;
-    if (!token || !codigoAluno || codigoEscola === undefined) {
-        return res.status(400).json({ error: 'Token, Código do Aluno e Código da Escola são necessários.' });
+// --- Rotas da Nossa API ---
+
+/**
+ * Rota de Login
+ * Recebe 'ra' e 'senha' do frontend, faz o login na API da SEDUC
+ * e retorna os dados do aluno.
+ */
+app.post('/api/login', async (req, res) => {
+    // Pega o 'ra' e a 'senha' do corpo da requisição enviada pelo frontend
+    const { ra, senha } = req.body;
+
+    if (!ra || !senha) {
+        return res.status(400).json({ message: 'RA e senha são obrigatórios.' });
     }
 
-    const authHeader = { 'Authorization': `Bearer ${token}` };
+    // Monta o payload para a API da SEDUC
+    const loginPayload = {
+        user: `${ra}SP`,
+        senha: senha
+    };
+
+    console.log(`[LOG] Tentando login para o usuário: ${loginPayload.user}`);
 
     try {
-        // --- PASSO 1: Buscar Turmas com todos os dados corretos ---
-        console.log(`[FINAL] Buscando turmas para aluno ${codigoAluno} na escola ${codigoEscola}...`);
-        const anoLetivo = new Date().getFullYear();
-        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${codigoEscola}`;
-        
-        const turmasResponse = await axios.get(turmasUrl, {
-            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
-        });
+        // Faz a chamada POST para a API de login da SEDUC usando axios
+        const response = await axios.post(
+            `${API_BASE_URL}/credenciais/api/LoginCompletoToken`,
+            loginPayload,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Ocp-Apim-Subscription-Key': LOGIN_API_KEY
+                }
+            }
+        );
 
-        if (!turmasResponse.data.isSucess) {
-             throw new Error("A busca por turmas não foi bem-sucedida.");
-        }
-        const turmas = turmasResponse.data.data || [];
-        console.log(`[FINAL] Encontradas ${turmas.length} turmas.`);
-
-        // --- PASSO 2: Buscar Mensagens e Avisos (se houver turmas) ---
-        let notificacoes = [], avisos = [];
-        if (turmas.length > 0) {
-            const primeiraTurmaId = turmas[0].codigo;
-            const [notificacoesRes, avisosRes] = await Promise.all([
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
-            ]);
-            notificacoes = notificacoesRes.data;
-            avisos = avisosRes.data;
-        }
-
-        // --- PASSO FINAL: Enviar tudo de volta para o frontend ---
-        res.status(200).json({ turmas, notificacoes, avisos });
+        console.log('[LOG] Login bem-sucedido na API da SEDUC.');
+        // Envia a resposta da API da SEDUC de volta para o frontend
+        res.json(response.data);
 
     } catch (error) {
-        console.error("[FINAL] Erro no fluxo:", error.response?.data || error.message);
-        res.status(400).json({ 
-            error: 'Falha ao buscar os dados do dashboard.', 
-            details: error.message 
-        });
+        console.error('[ERRO] Falha no login:', error.response ? error.response.data : error.message);
+        // Se a API da SEDUC retornar um erro (ex: 401, 403), repassa o status e a mensagem
+        const status = error.response ? error.response.status : 500;
+        const data = error.response ? error.response.data : { message: 'Erro interno no servidor proxy.' };
+        res.status(status).json(data);
     }
 });
 
-module.exports = app;
+/**
+ * Rota de Turmas
+ * Recebe 'codigoAluno' como parâmetro, busca as turmas na API da SEDUC
+ * e retorna a lista.
+ */
+app.get('/api/turmas', async (req, res) => {
+    const { codigoAluno } = req.query;
+
+    if (!codigoAluno) {
+        return res.status(400).json({ message: 'O código do aluno é obrigatório.' });
+    }
+
+    console.log(`[LOG] Buscando turmas para o código de aluno: ${codigoAluno}`);
+
+    try {
+        // Faz a chamada GET para a API de turmas da SEDUC
+        const response = await axios.get(
+            `${API_BASE_URL}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`,
+            {
+                headers: {
+                    'Ocp-Apim-Subscription-Key': TURMAS_API_KEY
+                }
+            }
+        );
+        
+        console.log('[LOG] Turmas encontradas com sucesso.');
+        // Envia a resposta (lista de turmas) de volta para o frontend
+        res.json(response.data);
+
+    } catch (error) {
+        console.error('[ERRO] Falha ao buscar turmas:', error.response ? error.response.data : error.message);
+        const status = error.response ? error.response.status : 500;
+        const data = error.response ? error.response.data : { message: 'Erro interno no servidor proxy.' };
+        res.status(status).json(data);
+    }
+});
+
+
+// Inicia o servidor para ouvir na porta definida
+app.listen(PORT, () => {
+    console.log(`Servidor proxy rodando em http://localhost:${PORT}`);
+    console.log('Aguardando requisições do frontend...');
+});
 
