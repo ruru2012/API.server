@@ -1,41 +1,39 @@
-// /api/server.js
-// Versão 15.0: Um proxy simples e robusto. A sua única função é
-// reencaminhar pedidos do nosso frontend para os servidores externos.
+// (Este código NÃO roda no navegador, apenas em um servidor Node.js)
+const puppeteer = require('puppeteer');
 
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-
-const app = express();
-app.use(cors()); 
-app.use(express.json());
-
-// ROTA ÚNICA DE PROXY
-app.post('/api/proxy', async (req, res) => {
-    const { method, url, data, headers } = req.body;
-
-    if (!method || !url) {
-        return res.status(400).json({ error: 'Método e URL são necessários.' });
-    }
-
-    console.log(`[PROXY] Reencaminhando pedido ${method} para ${url}`);
-
+async function getApiKey(loginUrl, username, password) {
+    let browser = null;
     try {
-        const response = await axios({
-            method: method,
-            url: url,
-            data: data || {},
-            headers: headers || {}
+        browser = await puppeteer.launch({ headless: true }); // 'true' para rodar invisível
+        const page = await browser.newPage();
+        await page.goto(loginUrl, { waitUntil: 'networkidle2' });
+
+        // Encontra os campos e o botão (os seletores '#user', '#pass', '#loginBtn' são exemplos)
+        await page.type('#username-input-selector', username); // Troque pelo seletor real
+        await page.type('#password-input-selector', password); // Troque pelo seletor real
+        await page.click('#login-button-selector'); // Troque pelo seletor real
+
+        // Espera a página carregar após o login
+        await page.waitForNavigation({ waitUntil: 'networkidle2' });
+
+        // Executa um script DENTRO da página logada para pegar a chave do localStorage
+        const apiKey = await page.evaluate(() => {
+            // O nome 'x-api-key' é um exemplo, você precisa descobrir o nome real
+            return localStorage.getItem('nome_real_da_chave_api'); 
         });
-        res.status(response.status).json(response.data);
+
+        if (!apiKey) {
+            throw new Error('Chave de API não encontrada após o login.');
+        }
+
+        return apiKey;
+
     } catch (error) {
-        console.error(`[PROXY] Erro ao contactar ${url}:`, error.response?.data || error.message);
-        res.status(error.response?.status || 500).json({ 
-            error: `Falha na comunicação com o servidor externo.`, 
-            details: error.response?.data 
-        });
+        console.error("Erro no robô Puppeteer:", error);
+        throw new Error("Automação falhou: " + error.message);
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
     }
-});
-
-module.exports = app;
-
+}
