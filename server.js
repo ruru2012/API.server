@@ -1,5 +1,6 @@
 // /api/server.js
-// Versão 6.1: Backend mais robusto com verificação em cada etapa para evitar crashes.
+// Versão 6.2: Corrige o erro "find is not a function" ao verificar
+// o formato da resposta de perfis antes de processá-la.
 
 const express = require('express');
 const axios = require('axios');
@@ -24,7 +25,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ROTA "MESTRE" COM VERIFICAÇÃO PASSO A PASSO
+// ROTA "MESTRE" COM A CORREÇÃO
 app.post('/api/get-all-data', async (req, res) => {
     const { token, codigoAluno } = req.body;
     if (!token || !codigoAluno) {
@@ -43,12 +44,28 @@ app.post('/api/get-all-data', async (req, res) => {
                 headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' }
             });
         } catch (e) {
-            throw new Error(`Falha no Passo 1 (Buscar Perfis). O token pode ter expirado ou a API de perfis está offline. Detalhes: ${e.message}`);
+            throw new Error(`Falha no Passo 1 (Buscar Perfis). Detalhes: ${e.message}`);
         }
         
-        const perfilAluno = perfisResponse.data.find(p => p.perfilId === 1);
+        // *** CORREÇÃO APLICADA AQUI ***
+        // Verificamos se a resposta é um objeto e se a lista está dentro de uma propriedade 'data'
+        const perfisData = perfisResponse.data;
+        let listaDePerfis;
+
+        if (Array.isArray(perfisData)) {
+            // Se a resposta já for um array, usamos diretamente.
+            listaDePerfis = perfisData;
+        } else if (perfisData && Array.isArray(perfisData.data)) {
+            // Se for um objeto com uma propriedade 'data' que é um array.
+            listaDePerfis = perfisData.data;
+        } else {
+            // Se não for nenhum dos formatos esperados, lançamos um erro claro.
+            throw new Error("Erro no Passo 1: A resposta da API de perfis não contém uma lista de perfis no formato esperado.");
+        }
+        
+        const perfilAluno = listaDePerfis.find(p => p.perfilId === 1);
         if (!perfilAluno || !perfilAluno.escolas || perfilAluno.escolas.length === 0) {
-            throw new Error("Erro no Passo 1: Perfil de aluno ou código da escola não foi encontrado na resposta de perfis.");
+            throw new Error("Erro no Passo 1: Perfil de aluno ou código da escola não foi encontrado na lista de perfis.");
         }
         const escolaId = perfilAluno.escolas[0].escolaId;
         console.log(`[DETETIVE] Passo 1 CONCLUÍDO. Escola ID: ${escolaId}`);
@@ -56,27 +73,27 @@ app.post('/api/get-all-data', async (req, res) => {
         // --- PASSO 2: Buscar Turmas ---
         let turmasResponse;
         try {
-            console.log("[DETETIVE] Passo 2: Buscando turmas com dados precisos...");
+            console.log("[DETETIVE] Passo 2: Buscando turmas...");
             const anoLetivo = new Date().getFullYear();
             const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${escolaId}`;
             turmasResponse = await axios.get(turmasUrl, {
                 headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
             });
         } catch (e) {
-            throw new Error(`Falha no Passo 2 (Buscar Turmas). O parâmetro 'codigoEscola' pode estar incorreto ou a API de turmas está offline. Detalhes: ${e.message}`);
+            throw new Error(`Falha no Passo 2 (Buscar Turmas). Detalhes: ${e.message}`);
         }
 
         if (!turmasResponse.data.isSucess) {
-             throw new Error("Erro no Passo 2: A busca por turmas não foi bem-sucedida, segundo o servidor.");
+             throw new Error("Erro no Passo 2: A busca por turmas não foi bem-sucedida.");
         }
-        const turmas = turmasResponse.data.data || []; // Garante que turmas seja um array
+        const turmas = turmasResponse.data.data || [];
         console.log(`[DETETIVE] Passo 2 CONCLUÍDO. Encontradas ${turmas.length} turmas.`);
 
         // --- PASSO 3: Buscar Mensagens e Avisos ---
         let notificacoes = [], avisos = [];
         if (turmas.length > 0) {
             try {
-                console.log("[DETETIVE] Passo 3: Buscando notificações e avisos...");
+                console.log("[DETETIVE] Passo 3: Buscando mensagens...");
                 const primeiraTurmaId = turmas[0].codigo;
                 
                 const [notificacoesRes, avisosRes] = await Promise.all([
@@ -87,8 +104,7 @@ app.post('/api/get-all-data', async (req, res) => {
                 avisos = avisosRes.data;
                 console.log(`[DETETIVE] Passo 3 CONCLUÍDO. Encontradas ${notificacoes.length} notificações e ${avisos.length} avisos.`);
             } catch (e) {
-                console.warn(`[DETETIVE] Aviso no Passo 3 (Mensagens): Não foi possível buscar mensagens. Continuando sem elas. Detalhes: ${e.message}`);
-                // Não lançamos um erro aqui, pois o app pode funcionar sem as mensagens
+                console.warn(`[DETETIVE] Aviso no Passo 3 (Mensagens): Não foi possível buscar. Detalhes: ${e.message}`);
             }
         }
 
@@ -97,14 +113,12 @@ app.post('/api/get-all-data', async (req, res) => {
 
     } catch (error) {
         console.error("[DETETIVE] Erro fatal no fluxo:", error.message);
-        // Envia uma mensagem de erro clara para o frontend
         res.status(400).json({ 
             error: 'Falha ao buscar os dados do dashboard.', 
-            details: error.message // A mensagem de erro específica que criamos
+            details: error.message
         });
     }
 });
 
 module.exports = app;
 
-                              
