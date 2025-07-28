@@ -1,113 +1,106 @@
-// Importa as bibliotecas necessárias
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 
-// Inicializa o aplicativo Express
 const app = express();
-const PORT = 3000; // A porta em que nosso servidor irá rodar
+const PORT = 3000;
 
-// --- Middlewares ---
-// Habilita o CORS para permitir que o frontend acesse este servidor
 app.use(cors());
-// Permite que o servidor entenda requisições com corpo em JSON
 app.use(express.json());
 
-// --- Constantes da API da SEDUC ---
-const API_BASE_URL = 'https://sedintegracoes.educacao.sp.gov.br';
+// --- Constantes das APIs ---
+const SED_API_URL = 'https://sedintegracoes.educacao.sp.gov.br';
+const EDUSP_API_URL = 'https://edusp-api.ip.tv';
+
 const LOGIN_API_KEY = '2b03c1db3884488795f79c37c069381a';
 const TURMAS_API_KEY = '5936fddda3484fe1aa4436df1bd76dab';
 
-// --- Rotas da Nossa API ---
+// --- Rotas ---
 
-/**
- * Rota de Login
- * Recebe 'ra' e 'senha' do frontend, faz o login na API da SEDUC
- * e retorna os dados do aluno.
- */
+// Rota de Login (SEDUC) - Sem alterações
 app.post('/api/login', async (req, res) => {
-    // Pega o 'ra' e a 'senha' do corpo da requisição enviada pelo frontend
     const { ra, senha } = req.body;
-
-    if (!ra || !senha) {
-        return res.status(400).json({ message: 'RA e senha são obrigatórios.' });
-    }
-
-    // Monta o payload para a API da SEDUC
-    const loginPayload = {
-        user: `${ra}SP`,
-        senha: senha
-    };
-
-    console.log(`[LOG] Tentando login para o usuário: ${loginPayload.user}`);
-
+    if (!ra || !senha) return res.status(400).json({ message: 'RA e senha são obrigatórios.' });
     try {
-        // Faz a chamada POST para a API de login da SEDUC usando axios
-        const response = await axios.post(
-            `${API_BASE_URL}/credenciais/api/LoginCompletoToken`,
-            loginPayload,
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Ocp-Apim-Subscription-Key': LOGIN_API_KEY
-                }
-            }
+        const response = await axios.post(`${SED_API_URL}/credenciais/api/LoginCompletoToken`, 
+            { user: `${ra}SP`, senha }, 
+            { headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': LOGIN_API_KEY } }
         );
-
-        console.log('[LOG] Login bem-sucedido na API da SEDUC.');
-        // Envia a resposta da API da SEDUC de volta para o frontend
         res.json(response.data);
-
     } catch (error) {
-        console.error('[ERRO] Falha no login:', error.response ? error.response.data : error.message);
-        // Se a API da SEDUC retornar um erro (ex: 401, 403), repassa o status e a mensagem
-        const status = error.response ? error.response.status : 500;
-        const data = error.response ? error.response.data : { message: 'Erro interno no servidor proxy.' };
-        res.status(status).json(data);
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
     }
 });
 
-/**
- * Rota de Turmas
- * Recebe 'codigoAluno' como parâmetro, busca as turmas na API da SEDUC
- * e retorna a lista.
- */
+// Rota de Turmas (SEDUC) - Sem alterações
 app.get('/api/turmas', async (req, res) => {
     const { codigoAluno } = req.query;
-
-    if (!codigoAluno) {
-        return res.status(400).json({ message: 'O código do aluno é obrigatório.' });
+    if (!codigoAluno) return res.status(400).json({ message: 'Código do aluno é obrigatório.' });
+    try {
+        const response = await axios.get(`${SED_API_URL}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, 
+            { headers: { 'Ocp-Apim-Subscription-Key': TURMAS_API_KEY } }
+        );
+        res.json(response.data);
+    } catch (error) {
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
     }
+});
 
-    console.log(`[LOG] Buscando turmas para o código de aluno: ${codigoAluno}`);
+// NOVA ROTA: Troca o token de login pela chave da API EDUSP
+app.post('/api/edusp-token', async (req, res) => {
+    const { loginToken } = req.body;
+    if (!loginToken) return res.status(400).json({ message: 'Token de login é obrigatório.' });
+    try {
+        const response = await axios.post(`${EDUSP_API_URL}/registration/edusp/token`, 
+            { token: loginToken },
+            { headers: { 'x-api-realm': 'edusp', 'x-api-platform': 'webclient' } }
+        );
+        res.json(response.data);
+    } catch (error) {
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
+    }
+});
+
+// ROTA ATUALIZADA: Busca as tarefas reais na API EDUSP
+app.post('/api/tarefas', async (req, res) => {
+    const { apiKey, turmas, nickname } = req.body;
+    if (!apiKey || !turmas) return res.status(400).json({ message: 'Chave de API e lista de turmas são obrigatórias.' });
+
+    // Constrói a lista de "publication_target" a partir dos dados das turmas
+    const publicationTargets = new URLSearchParams();
+    turmas.forEach(turma => {
+        // A API parece usar vários IDs da turma. Adicionamos os que temos.
+        if (turma.id) publicationTargets.append('publication_target', turma.id);
+        if (turma.codigo) publicationTargets.append('publication_target', turma.codigo);
+        if (turma.turmaId) publicationTargets.append('publication_target', turma.turmaId);
+        
+        // Adiciona o alvo específico do usuário para a turma, se o nickname estiver disponível
+        if (turma.id && nickname) {
+            publicationTargets.append('publication_target', `${turma.id}:${nickname}`);
+        }
+    });
+
+    const queryString = `expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false&${publicationTargets.toString()}&with_apply_moment=true`;
+    const fullUrl = `${EDUSP_API_URL}/tms/task/todo?${queryString}`;
+    
+    console.log(`[LOG] Buscando tarefas com URL: ${fullUrl}`);
 
     try {
-        // Faz a chamada GET para a API de turmas da SEDUC
-        const response = await axios.get(
-            `${API_BASE_URL}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`,
-            {
-                headers: {
-                    'Ocp-Apim-Subscription-Key': TURMAS_API_KEY
-                }
+        const response = await axios.get(fullUrl, {
+            headers: {
+                'accept': 'application/json',
+                'x-api-key': apiKey,
+                'x-api-realm': 'edusp',
+                'x-api-platform': 'webclient'
             }
-        );
-        
-        console.log('[LOG] Turmas encontradas com sucesso.');
-        // Envia a resposta (lista de turmas) de volta para o frontend
+        });
         res.json(response.data);
-
     } catch (error) {
-        console.error('[ERRO] Falha ao buscar turmas:', error.response ? error.response.data : error.message);
-        const status = error.response ? error.response.status : 500;
-        const data = error.response ? error.response.data : { message: 'Erro interno no servidor proxy.' };
-        res.status(status).json(data);
+        console.error('[ERRO] Falha ao buscar tarefas:', error.response?.data || error.message);
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro ao buscar tarefas no servidor proxy.' });
     }
 });
 
+app.listen(PORT, () => console.log(`Servidor proxy rodando na porta ${PORT}`));
 
-// Inicia o servidor para ouvir na porta definida
-app.listen(PORT, () => {
-    console.log(`Servidor proxy rodando em http://localhost:${PORT}`);
-    console.log('Aguardando requisições do frontend...');
-});
-
+            
