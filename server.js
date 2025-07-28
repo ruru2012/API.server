@@ -1,6 +1,5 @@
 // /api/server.js
-// Versão Final: Usa o login do Taskitos para obter o x-api-key e o método da
-// Sala do Futuro (sem assinatura) para buscar as tarefas.
+// Versão Final e Definitiva: Usa o login oficial e o Código CIE fornecido pelo utilizador.
 
 const express = require('express');
 const axios = require('axios');
@@ -10,77 +9,66 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// --- FUNÇÃO DE CABEÇALHOS PADRÃO ---
-// Estes são os cabeçalhos mínimos necessários que ambos os sites usam.
-const getHeaders = (token) => ({
-    'x-api-key': token,
-    'origin': 'https://saladofuturo.educacao.sp.gov.br', // Fingimos ser o site oficial
-    'referer': 'https://saladofuturo.educacao.sp.gov.br/',
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
-});
-
-// --- ROTAS DA API ---
-
-// ROTA DE LOGIN (MÉTODO TASKITOS - A nossa chave de entrada)
+// ROTA DE LOGIN (Método confiável da SED)
 app.post('/api/login', async (req, res) => {
   const { ra, senha } = req.body;
   if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
   try {
-    // Usamos o endpoint de registro que nos dá o token correto.
-    const response = await axios.post('https://edusp-api.ip.tv/registration/edusp', 
-      { realm: "edusp", platform: "webclient", id: `${ra}sp`, password: senha },
-      { 
-        headers: { 
-            'origin': 'https://taskitos.cupiditys.lol', // O login ainda precisa parecer vir do Taskitos
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
-        } 
-      }
+    const response = await axios.post('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', 
+      { user: `${ra}SP`, senha },
+      { headers: { 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a' } }
     );
     res.status(200).json(response.data);
   } catch (error) {
-    res.status(error.response?.status || 500).json({ error: 'Falha no login. Verifique seu RA e senha.', details: error.response?.data });
+    res.status(error.response?.status || 500).json({ error: 'Falha no login', details: error.response?.data });
   }
 });
 
-// ROTA "MESTRE" QUE BUSCA AS TAREFAS
-app.post('/api/get-tasks', async (req, res) => {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Token é necessário.' });
+// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
+app.post('/api/get-all-data', async (req, res) => {
+    // Recebe o codigoEscola diretamente do frontend, fornecido pelo utilizador.
+    const { token, codigoAluno, codigoEscola } = req.body;
+    if (!token || !codigoAluno || !codigoEscola) {
+        return res.status(400).json({ error: 'Token, Código do Aluno e Código da Escola são necessários.' });
+    }
+
+    const authHeader = { 'Authorization': `Bearer ${token}` };
 
     try {
-        // --- PASSO 1: Obter a lista de "salas" e grupos ---
-        const roomsResponse = await axios.get('https://edusp-api.ip.tv/room/user', { 
-            headers: getHeaders(token) 
-        });
+        // --- PASSO 1: Buscar Turmas com o código da escola fornecido manualmente ---
+        const anoLetivo = new Date().getFullYear();
+        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${codigoEscola}`;
         
-        const roomsData = roomsResponse.data;
-        if (!roomsData || !roomsData.rooms) {
-            throw new Error("Resposta de /room/user inválida.");
-        }
-
-        const roomIds = roomsData.rooms.map(room => room.id);
-        const groupIds = roomsData.rooms.flatMap(room => room.group_categories ? room.group_categories.map(group => group.id) : []);
-        const allTargets = [...new Set([...roomIds, ...groupIds])];
-
-        if (allTargets.length === 0) {
-            return res.status(200).json({ items: [] });
-        }
-
-        // --- PASSO 2: Buscar as tarefas com os alvos corretos ---
-        const publicationTargets = allTargets.map(target => `publication_target=${target}`).join('&');
-        const urlTarefas = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false&${publicationTargets}`;
-
-        const tarefasResponse = await axios.get(urlTarefas, { 
-            headers: getHeaders(token) 
+        const turmasResponse = await axios.get(turmasUrl, {
+            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
         });
 
-        res.status(200).json(tarefasResponse.data);
+        if (!turmasResponse.data.isSucess) {
+             throw new Error("A busca por turmas não foi bem-sucedida. Verifique se o Código CIE está correto.");
+        }
+        const turmas = turmasResponse.data.data || [];
+
+        // --- PASSO 2: Buscar Mensagens e Avisos ---
+        let notificacoes = [], avisos = [];
+        if (turmas.length > 0) {
+            const primeiraTurmaId = turmas[0].codigo;
+            const [notificacoesRes, avisosRes] = await Promise.all([
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
+            ]);
+            notificacoes = notificacoesRes.data;
+            avisos = avisosRes.data;
+        }
+
+        res.status(200).json({ turmas, notificacoes, avisos });
 
     } catch (error) {
-        res.status(error.response?.status || 500).json({ error: 'Falha ao buscar tarefas.', details: error.response?.data });
+        res.status(400).json({ 
+            error: 'Falha ao buscar os dados do dashboard.', 
+            details: error.message 
+        });
     }
 });
 
 module.exports = app;
 
-            
