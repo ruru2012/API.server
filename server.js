@@ -1,5 +1,5 @@
 // /api/server.js
-// Versão 7.0: Ferramenta de investigação com endpoints separados para cada passo.
+// Versão Final: Usa a informação de CD_ESCOLA diretamente da resposta do login.
 
 const express = require('express');
 const axios = require('axios');
@@ -24,54 +24,55 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ROTA PARA PASSO 1: BUSCAR PERFIS
-app.post('/api/get-perfis', async (req, res) => {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Token é necessário.' });
-
-    try {
-        console.log("[INVESTIGADOR] Executando Passo 1: Buscar Perfis...");
-        const perfisUrl = 'https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-perfis';
-        const perfisResponse = await axios.get(perfisUrl, { 
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' 
-            }
-        });
-        // Retorna a resposta bruta para análise
-        res.status(200).json(perfisResponse.data);
-    } catch (error) {
-        console.error("[INVESTIGADOR] Erro no Passo 1:", error.response?.data || error.message);
-        res.status(500).json({ error: 'Falha ao buscar perfis.', details: error.response?.data || error.message });
-    }
-});
-
-// ROTA PARA PASSO 2: TESTAR BUSCA DE TURMAS
-app.post('/api/get-turmas', async (req, res) => {
-    const { token, codigoAluno, escolaId } = req.body;
-    if (!token || !codigoAluno || !escolaId) {
-        return res.status(400).json({ error: 'Token, Código do Aluno e ID da Escola são necessários.' });
+// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
+app.post('/api/get-all-data', async (req, res) => {
+    // Agora recebemos o token, codigoAluno e o codigoEscola do frontend
+    const { token, codigoAluno, codigoEscola } = req.body;
+    if (!token || !codigoAluno || codigoEscola === undefined) {
+        return res.status(400).json({ error: 'Token, Código do Aluno e Código da Escola são necessários.' });
     }
 
+    const authHeader = { 'Authorization': `Bearer ${token}` };
+
     try {
-        console.log(`[INVESTIGADOR] Executando Passo 2: Buscando Turmas com escolaId: ${escolaId}...`);
+        // --- PASSO 1: Buscar Turmas com todos os dados corretos ---
+        console.log(`[FINAL] Buscando turmas para aluno ${codigoAluno} na escola ${codigoEscola}...`);
         const anoLetivo = new Date().getFullYear();
-        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${escolaId}`;
+        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${codigoEscola}`;
         
         const turmasResponse = await axios.get(turmasUrl, {
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' 
-            }
+            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
         });
-        // Retorna a resposta bruta para análise
-        res.status(200).json(turmasResponse.data);
+
+        if (!turmasResponse.data.isSucess) {
+             throw new Error("A busca por turmas não foi bem-sucedida.");
+        }
+        const turmas = turmasResponse.data.data || [];
+        console.log(`[FINAL] Encontradas ${turmas.length} turmas.`);
+
+        // --- PASSO 2: Buscar Mensagens e Avisos (se houver turmas) ---
+        let notificacoes = [], avisos = [];
+        if (turmas.length > 0) {
+            const primeiraTurmaId = turmas[0].codigo;
+            const [notificacoesRes, avisosRes] = await Promise.all([
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
+            ]);
+            notificacoes = notificacoesRes.data;
+            avisos = avisosRes.data;
+        }
+
+        // --- PASSO FINAL: Enviar tudo de volta para o frontend ---
+        res.status(200).json({ turmas, notificacoes, avisos });
+
     } catch (error) {
-        console.error("[INVESTIGADOR] Erro no Passo 2:", error.response?.data || error.message);
-        res.status(500).json({ error: 'Falha ao buscar turmas.', details: error.response?.data || error.message });
+        console.error("[FINAL] Erro no fluxo:", error.response?.data || error.message);
+        res.status(400).json({ 
+            error: 'Falha ao buscar os dados do dashboard.', 
+            details: error.message 
+        });
     }
 });
 
 module.exports = app;
 
-          
