@@ -1,5 +1,5 @@
 // /api/server.js
-// Versão 12.0: Modo Investigador Forense com endpoints separados para cada passo da investigação.
+// Versão Final: Automatiza todo o fluxo de investigação do Taskitos.
 
 const express = require('express');
 const axios = require('axios');
@@ -10,7 +10,6 @@ app.use(cors());
 app.use(express.json());
 
 // --- FUNÇÃO DE CABEÇALHOS PADRÃO ---
-// Centraliza a criação dos cabeçalhos que imitam o Taskitos.
 const getTaskitosHeaders = (token) => ({
     'x-api-key': token,
     'x-client-domain': 'taskitos.cupiditys.lol',
@@ -20,42 +19,61 @@ const getTaskitosHeaders = (token) => ({
 
 // --- ROTAS DA API ---
 
-// ROTA PARA PASSO 1: BUSCAR "SALAS" (TURMAS E OUTROS DADOS)
-app.post('/api/get-rooms', async (req, res) => {
+// ROTA DE LOGIN (MÉTODO TASKITOS)
+app.post('/api/login', async (req, res) => {
+  const { ra, senha } = req.body;
+  if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
+  try {
+    const response = await axios.post('https://edusp-api.ip.tv/registration/edusp', 
+      { realm: "edusp", platform: "webclient", id: `${ra}sp`, password: senha },
+      { 
+        headers: { 
+            'x-client-timestamp': Date.now(),
+            'x-client-domain': 'taskitos.cupiditys.lol',
+            'origin': 'https://taskitos.cupiditys.lol',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+        } 
+      }
+    );
+    res.status(200).json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Falha no login (método Taskitos)', details: error.response?.data });
+  }
+});
+
+// ROTA "MESTRE" QUE BUSCA AS TAREFAS AUTOMATICAMENTE
+app.post('/api/get-tasks', async (req, res) => {
     const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'O token (x-api-key) é necessário.' });
+    if (!token) return res.status(400).json({ error: 'Token é necessário.' });
 
     try {
-        console.log("[FORENSE] Passo 1: Buscando dados de /room/user...");
+        // --- PASSO 1: Extrair Pistas Automaticamente ---
         const roomsResponse = await axios.get('https://edusp-api.ip.tv/room/user', { 
             headers: getTaskitosHeaders(token) 
         });
-        // Retorna a resposta bruta para análise no frontend.
-        res.status(200).json(roomsResponse.data);
-    } catch (error) {
-        res.status(error.response?.status || 500).json({ error: 'Falha ao buscar dados das salas.', details: error.response?.data });
-    }
-});
-
-// ROTA PARA PASSO 2: BUSCAR TAREFAS COM OS ALVOS CORRETOS
-app.post('/api/get-tasks', async (req, res) => {
-    const { token, targets } = req.body;
-    if (!token || !targets || !Array.isArray(targets) || targets.length === 0) {
-        return res.status(400).json({ error: 'Token e uma lista de "targets" são necessários.' });
-    }
-
-    try {
-        console.log("[FORENSE] Passo 2: Buscando tarefas com os alvos:", targets);
         
-        // Constrói a parte da URL com todos os publication_target[]
-        const publicationTargets = targets.map(target => `publication_target[]=${target}`).join('&');
+        const roomsData = roomsResponse.data;
+        if (!roomsData || !roomsData.rooms) {
+            throw new Error("Resposta de /room/user inválida ou sem a propriedade 'rooms'.");
+        }
+
+        // Extrai todos os IDs necessários
+        const roomIds = roomsData.rooms.map(room => room.id);
+        const groupIds = roomsData.rooms.flatMap(room => room.group_categories ? room.group_categories.map(group => group.id) : []);
+        const allTargets = [...new Set([...roomIds, ...groupIds])]; // Junta tudo e remove duplicados
+
+        if (allTargets.length === 0) {
+            return res.status(200).json({ items: [] });
+        }
+
+        // --- PASSO 2: Buscar as tarefas com os alvos corretos ---
+        const publicationTargets = allTargets.map(target => `publication_target[]=${target}`).join('&');
         const urlTarefas = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&is_essay=false&is_exam=false&answer_statuses=draft&answer_statuses=pending&with_answer=true&with_apply_moment=true&limit=100&filter_expired=true&offset=0&${publicationTargets}`;
 
         const tarefasResponse = await axios.get(urlTarefas, { 
             headers: getTaskitosHeaders(token) 
         });
 
-        console.log("[FORENSE] Sucesso! Tarefas encontradas.");
         res.status(200).json(tarefasResponse.data);
 
     } catch (error) {
@@ -65,3 +83,4 @@ app.post('/api/get-tasks', async (req, res) => {
 
 module.exports = app;
 
+        
