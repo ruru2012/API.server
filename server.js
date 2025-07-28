@@ -17,7 +17,7 @@ const TURMAS_API_KEY = '5936fddda3484fe1aa4436df1bd76dab';
 
 // --- Rotas ---
 
-// Rota de Login (SEDUC) - Sem alterações
+// Rota de Login (SEDUC)
 app.post('/api/login', async (req, res) => {
     const { ra, senha } = req.body;
     if (!ra || !senha) return res.status(400).json({ message: 'RA e senha são obrigatórios.' });
@@ -28,11 +28,11 @@ app.post('/api/login', async (req, res) => {
         );
         res.json(response.data);
     } catch (error) {
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao tentar login.' });
     }
 });
 
-// Rota de Turmas (SEDUC) - Sem alterações
+// Rota de Turmas (SEDUC)
 app.get('/api/turmas', async (req, res) => {
     const { codigoAluno } = req.query;
     if (!codigoAluno) return res.status(400).json({ message: 'Código do aluno é obrigatório.' });
@@ -42,43 +42,51 @@ app.get('/api/turmas', async (req, res) => {
         );
         res.json(response.data);
     } catch (error) {
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao buscar turmas.' });
     }
 });
 
-// NOVA ROTA: Troca o token de login pela chave da API EDUSP
+// ROTA CORRIGIDA: Troca o token de login pela chave da API EDUSP
 app.post('/api/edusp-token', async (req, res) => {
     const { loginToken } = req.body;
     if (!loginToken) return res.status(400).json({ message: 'Token de login é obrigatório.' });
     try {
+        console.log('[LOG] Trocando token de login pela chave da API EDUSP...');
         const response = await axios.post(`${EDUSP_API_URL}/registration/edusp/token`, 
             { token: loginToken },
-            { headers: { 'x-api-realm': 'edusp', 'x-api-platform': 'webclient' } }
+            {
+                // CORREÇÃO: Adicionados os cabeçalhos que faltavam para a requisição ser aceita.
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-realm': 'edusp',
+                    'x-api-platform': 'webclient'
+                }
+            }
         );
+        console.log('[LOG] Chave da API EDUSP recebida com sucesso.');
         res.json(response.data);
     } catch (error) {
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy.' });
+        console.error('[ERRO] Falha ao obter a chave da API EDUSP:', error.response?.data || error.message);
+        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao obter chave EDUSP.' });
     }
 });
 
-// ROTA ATUALIZADA: Busca as tarefas reais na API EDUSP
+// Rota de Tarefas (EDUSP)
 app.post('/api/tarefas', async (req, res) => {
     const { apiKey, turmas, nickname } = req.body;
     if (!apiKey || !turmas) return res.status(400).json({ message: 'Chave de API e lista de turmas são obrigatórias.' });
 
-    // Constrói a lista de "publication_target" a partir dos dados das turmas
     const publicationTargets = new URLSearchParams();
+    const uniqueTargets = new Set();
+
     turmas.forEach(turma => {
-        // A API parece usar vários IDs da turma. Adicionamos os que temos.
-        if (turma.id) publicationTargets.append('publication_target', turma.id);
-        if (turma.codigo) publicationTargets.append('publication_target', turma.codigo);
-        if (turma.turmaId) publicationTargets.append('publication_target', turma.turmaId);
-        
-        // Adiciona o alvo específico do usuário para a turma, se o nickname estiver disponível
-        if (turma.id && nickname) {
-            publicationTargets.append('publication_target', `${turma.id}:${nickname}`);
-        }
+        if (turma.id) uniqueTargets.add(turma.id);
+        if (turma.codigo) uniqueTargets.add(turma.codigo);
+        if (turma.turmaId) uniqueTargets.add(turma.turmaId);
+        if (turma.id && nickname) uniqueTargets.add(`${turma.id}:${nickname}`);
     });
+
+    uniqueTargets.forEach(target => publicationTargets.append('publication_target', target));
 
     const queryString = `expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false&${publicationTargets.toString()}&with_apply_moment=true`;
     const fullUrl = `${EDUSP_API_URL}/tms/task/todo?${queryString}`;
@@ -103,4 +111,3 @@ app.post('/api/tarefas', async (req, res) => {
 
 app.listen(PORT, () => console.log(`Servidor proxy rodando na porta ${PORT}`));
 
-            
