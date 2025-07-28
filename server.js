@@ -1,6 +1,5 @@
 // /api/server.js
-// Versão 6.0: Implementa uma busca sequencial inteligente.
-// 1. Login -> 2. Busca Perfil/Escola -> 3. Busca Turmas com dados completos.
+// Versão 6.1: Backend mais robusto com verificação em cada etapa para evitar crashes.
 
 const express = require('express');
 const axios = require('axios');
@@ -10,7 +9,7 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// ROTA DE LOGIN (Método original da SED)
+// ROTA DE LOGIN (Inalterada)
 app.post('/api/login', async (req, res) => {
   const { ra, senha } = req.body;
   if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
@@ -25,7 +24,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
+// ROTA "MESTRE" COM VERIFICAÇÃO PASSO A PASSO
 app.post('/api/get-all-data', async (req, res) => {
     const { token, codigoAluno } = req.body;
     if (!token || !codigoAluno) {
@@ -35,61 +34,77 @@ app.post('/api/get-all-data', async (req, res) => {
     const authHeader = { 'Authorization': `Bearer ${token}` };
 
     try {
-        // --- PASSO 1: Buscar Perfis para encontrar o código da escola ---
-        console.log("[DETETIVE] Passo 1: Buscando perfis do usuário...");
-        const perfisUrl = 'https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-perfis';
-        const perfisResponse = await axios.get(perfisUrl, { 
-            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' }
-        });
+        // --- PASSO 1: Buscar Perfis ---
+        let perfisResponse;
+        try {
+            console.log("[DETETIVE] Passo 1: Buscando perfis do usuário...");
+            const perfisUrl = 'https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-perfis';
+            perfisResponse = await axios.get(perfisUrl, { 
+                headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' }
+            });
+        } catch (e) {
+            throw new Error(`Falha no Passo 1 (Buscar Perfis). O token pode ter expirado ou a API de perfis está offline. Detalhes: ${e.message}`);
+        }
         
-        const perfilAluno = perfisResponse.data.find(p => p.perfilId === 1); // Perfil 1 é "Aluno"
+        const perfilAluno = perfisResponse.data.find(p => p.perfilId === 1);
         if (!perfilAluno || !perfilAluno.escolas || perfilAluno.escolas.length === 0) {
-            throw new Error("Perfil de aluno ou código da escola não foi encontrado na resposta de perfis.");
+            throw new Error("Erro no Passo 1: Perfil de aluno ou código da escola não foi encontrado na resposta de perfis.");
         }
         const escolaId = perfilAluno.escolas[0].escolaId;
         console.log(`[DETETIVE] Passo 1 CONCLUÍDO. Escola ID: ${escolaId}`);
         
-        // --- PASSO 2: Buscar Turmas com o código da escola e ano letivo ---
-        console.log("[DETETIVE] Passo 2: Buscando turmas com dados precisos...");
-        const anoLetivo = new Date().getFullYear();
-        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${escolaId}`;
-        
-        const turmasResponse = await axios.get(turmasUrl, {
-            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
-        });
-
-        if (!turmasResponse.data.isSucess || !turmasResponse.data.data) {
-             throw new Error("A busca por turmas falhou ou não retornou dados. Verifique se o ano letivo e a escola estão corretos.");
+        // --- PASSO 2: Buscar Turmas ---
+        let turmasResponse;
+        try {
+            console.log("[DETETIVE] Passo 2: Buscando turmas com dados precisos...");
+            const anoLetivo = new Date().getFullYear();
+            const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${escolaId}`;
+            turmasResponse = await axios.get(turmasUrl, {
+                headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
+            });
+        } catch (e) {
+            throw new Error(`Falha no Passo 2 (Buscar Turmas). O parâmetro 'codigoEscola' pode estar incorreto ou a API de turmas está offline. Detalhes: ${e.message}`);
         }
-        const turmas = turmasResponse.data.data;
+
+        if (!turmasResponse.data.isSucess) {
+             throw new Error("Erro no Passo 2: A busca por turmas não foi bem-sucedida, segundo o servidor.");
+        }
+        const turmas = turmasResponse.data.data || []; // Garante que turmas seja um array
         console.log(`[DETETIVE] Passo 2 CONCLUÍDO. Encontradas ${turmas.length} turmas.`);
 
-        // --- PASSO 3: Buscar Mensagens e Avisos (se houver turmas) ---
+        // --- PASSO 3: Buscar Mensagens e Avisos ---
         let notificacoes = [], avisos = [];
         if (turmas.length > 0) {
-            console.log("[DETETIVE] Passo 3: Buscando notificações e avisos...");
-            const primeiraTurmaId = turmas[0].codigo;
-            
-            const [notificacoesRes, avisosRes] = await Promise.all([
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
-                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
-            ]);
-            notificacoes = notificacoesRes.data;
-            avisos = avisosRes.data;
-            console.log(`[DETETIVE] Passo 3 CONCLUÍDO. Encontradas ${notificacoes.length} notificações e ${avisos.length} avisos.`);
+            try {
+                console.log("[DETETIVE] Passo 3: Buscando notificações e avisos...");
+                const primeiraTurmaId = turmas[0].codigo;
+                
+                const [notificacoesRes, avisosRes] = await Promise.all([
+                    axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
+                    axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
+                ]);
+                notificacoes = notificacoesRes.data;
+                avisos = avisosRes.data;
+                console.log(`[DETETIVE] Passo 3 CONCLUÍDO. Encontradas ${notificacoes.length} notificações e ${avisos.length} avisos.`);
+            } catch (e) {
+                console.warn(`[DETETIVE] Aviso no Passo 3 (Mensagens): Não foi possível buscar mensagens. Continuando sem elas. Detalhes: ${e.message}`);
+                // Não lançamos um erro aqui, pois o app pode funcionar sem as mensagens
+            }
         }
 
         // --- PASSO FINAL: Enviar tudo de volta para o frontend ---
         res.status(200).json({ turmas, notificacoes, avisos });
 
     } catch (error) {
-        console.error("[DETETIVE] Erro no fluxo:", error.response?.data || error.message);
-        res.status(500).json({ 
+        console.error("[DETETIVE] Erro fatal no fluxo:", error.message);
+        // Envia uma mensagem de erro clara para o frontend
+        res.status(400).json({ 
             error: 'Falha ao buscar os dados do dashboard.', 
-            details: error.response?.data || error.message 
+            details: error.message // A mensagem de erro específica que criamos
         });
     }
 });
 
 module.exports = app;
 
+                              
