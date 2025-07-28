@@ -1,5 +1,5 @@
 // /api/server.js
-// Versão 10.0: Implementa o método híbrido. Login via Taskitos, busca de tarefas sem assinatura.
+// Versão Final: Usa o método de login da Sala do Futuro e lida com a resposta de CD_ESCOLA: 0.
 
 const express = require('express');
 const axios = require('axios');
@@ -9,67 +9,67 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// --- ROTAS DA API ---
-
-// ROTA DE LOGIN (MÉTODO TASKITOS)
+// ROTA DE LOGIN (Método original da SED)
 app.post('/api/login', async (req, res) => {
   const { ra, senha } = req.body;
   if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
   try {
-    const response = await axios.post('https://edusp-api.ip.tv/registration/edusp', 
-      { realm: "edusp", platform: "webclient", id: `${ra}sp`, password: senha },
-      { 
-        headers: { 
-            'x-client-timestamp': Date.now(),
-            'x-client-domain': 'taskitos.cupiditys.lol',
-            'origin': 'https://taskitos.cupiditys.lol',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
-        } 
-      }
+    const response = await axios.post('https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken', 
+      { user: `${ra}SP`, senha },
+      { headers: { 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a' } }
     );
     res.status(200).json(response.data);
   } catch (error) {
-    res.status(error.response?.status || 500).json({ error: 'Falha no login (método Taskitos)', details: error.response?.data });
+    res.status(error.response?.status || 500).json({ error: 'Falha no login', details: error.response?.data });
   }
 });
 
-// ROTA PARA BUSCAR TAREFAS (MÉTODO TASKITOS SIMPLIFICADO)
-app.post('/api/tarefas', async (req, res) => {
-    const { token } = req.body;
-    if (!token) return res.status(400).json({ error: 'Token é necessário.' });
+// ROTA "MESTRE" QUE BUSCA TODOS OS DADOS DO DASHBOARD
+app.post('/api/get-all-data', async (req, res) => {
+    const { token, loginData } = req.body;
+    if (!token || !loginData) {
+        return res.status(400).json({ error: 'Dados de login são necessários.' });
+    }
+    
+    const codigoAluno = loginData.DadosUsuario.CD_USUARIO;
+    // Pega o código da escola, mesmo que seja 0.
+    const codigoEscola = loginData.DadosUsuario.PERFIS[0]?.CD_ESCOLA;
 
-    const headers = {
-        'x-api-key': token,
-        'x-client-domain': 'taskitos.cupiditys.lol',
-        'origin': 'https://taskitos.cupiditys.lol',
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
-    };
+    if (codigoEscola === undefined) {
+        return res.status(400).json({ error: 'Não foi possível encontrar o perfil do aluno nos dados de login.' });
+    }
+
+    const authHeader = { 'Authorization': `Bearer ${token}` };
 
     try {
-        // --- PASSO 1: Obter a lista de "salas" (turmas) do usuário ---
-        console.log("[HÍBRIDO] Passo 1: Buscando salas do usuário...");
-        const roomsResponse = await axios.get('https://edusp-api.ip.tv/room/user', { headers });
+        const anoLetivo = new Date().getFullYear();
+        const turmasUrl = `https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}&anoLetivo=${anoLetivo}&codigoEscola=${codigoEscola}`;
         
-        const rooms = roomsResponse.data.items;
-        if (!rooms || rooms.length === 0) {
-            console.log("[HÍBRIDO] Nenhuma sala encontrada.");
-            return res.status(200).json({ items: [] });
+        const turmasResponse = await axios.get(turmasUrl, {
+            headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab' }
+        });
+
+        // Mesmo que a busca não retorne turmas, continuamos para buscar o resto.
+        const turmas = turmasResponse.data.data || [];
+        
+        let notificacoes = [], avisos = [];
+        if (turmas.length > 0) {
+            const primeiraTurmaId = turmas[0].codigo;
+            const [notificacoesRes, avisosRes] = await Promise.all([
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/cmspwebservice/api/sala-do-futuro-alunos/consulta-notificacao?userId=${codigoAluno}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': '1a758fd2f6be41448079c9616a861b91' } }),
+                axios.get(`https://sedintegracoes.educacao.sp.gov.br/muralavisosapi/api/mural-avisos/listar-avisos?CodigoUsuario=${codigoAluno}&PerfilAviso=1&Turmas=${primeiraTurmaId}`, { headers: { ...authHeader, 'Ocp-Apim-Subscription-Key': 'efc224c33f02487c91c0a299634b2077' } })
+            ]);
+            notificacoes = notificacoesRes.data;
+            avisos = avisosRes.data;
         }
-        console.log(`[HÍBRIDO] Encontradas ${rooms.length} salas.`);
 
-        // --- PASSO 2: Buscar as tarefas para cada sala ---
-        console.log("[HÍBRIDO] Passo 2: Buscando tarefas...");
-        const publicationTargets = rooms.map(room => `publication_target[]=${room.id}`).join('&');
-        const urlTarefas = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&is_essay=false&is_exam=false&answer_statuses=draft&answer_statuses=pending&with_answer=true&with_apply_moment=true&limit=100&filter_expired=true&offset=0&${publicationTargets}`;
-
-        const tarefasResponse = await axios.get(urlTarefas, { headers });
-
-        console.log("[HÍBRIDO] Sucesso! Tarefas encontradas.");
-        res.status(200).json(tarefasResponse.data);
+        res.status(200).json({ turmas, notificacoes, avisos, debug: { sentCodigoEscola: codigoEscola } });
 
     } catch (error) {
-        console.error("[HÍBRIDO] Erro no fluxo:", error.response?.data || error.message);
-        res.status(error.response?.status || 500).json({ error: 'Falha ao buscar tarefas.', details: error.response?.data });
+        res.status(400).json({ 
+            error: 'Falha ao buscar os dados do dashboard.', 
+            details: error.message 
+        });
     }
 });
 
