@@ -1,113 +1,125 @@
+// /api/server.js
+// Versão 8.0: Implementa o método de autenticação e fluxo do "Taskitos".
+
 const express = require('express');
-const axios = require('axios');
+const axios =require('axios');
 const cors = require('cors');
+const crypto = require('crypto'); // Módulo nativo do Node.js para criptografia
 
 const app = express();
-const PORT = 3000;
-
-app.use(cors());
+app.use(cors()); 
 app.use(express.json());
 
-// --- Constantes das APIs ---
-const SED_API_URL = 'https://sedintegracoes.educacao.sp.gov.br';
-const EDUSP_API_URL = 'https://edusp-api.ip.tv';
+// --- FUNÇÃO PARA GERAR A ASSINATURA ---
+// Recriamos uma lógica plausível para a assinatura que o Taskitos usa.
+// A assinatura parece ser um número aleatório, mas vamos usar um método mais robusto
+// que simula uma assinatura real baseada no tempo e ID do usuário.
+function generateSignature(timestamp, userId) {
+    const text = `${timestamp}${userId}`;
+    const hash = crypto.createHash('md5').update(text).digest('hex');
+    // Pegamos uma parte da hash e convertemos para um número, depois para Base64.
+    const numericHash = parseInt(hash.substring(0, 8), 16);
+    return Buffer.from(String(numericHash)).toString('base64');
+}
 
-const LOGIN_API_KEY = '2b03c1db3884488795f79c37c069381a';
-const TURMAS_API_KEY = '5936fddda3484fe1aa4436df1bd76dab';
+// --- ROTAS DA API ---
 
-// --- Rotas ---
-
-// Rota de Login (SEDUC)
+// ROTA DE LOGIN (MÉTODO TASKITOS)
 app.post('/api/login', async (req, res) => {
-    const { ra, senha } = req.body;
-    if (!ra || !senha) return res.status(400).json({ message: 'RA e senha são obrigatórios.' });
-    try {
-        const response = await axios.post(`${SED_API_URL}/credenciais/api/LoginCompletoToken`, 
-            { user: `${ra}SP`, senha }, 
-            { headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': LOGIN_API_KEY } }
-        );
-        res.json(response.data);
-    } catch (error) {
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao tentar login.' });
-    }
+  const { ra, senha } = req.body;
+  if (!ra || !senha) return res.status(400).json({ error: 'RA e Senha são obrigatórios.' });
+  try {
+    const timestamp = Date.now();
+    // A assinatura do login é diferente, parece ser baseada apenas no RA.
+    const signature = Buffer.from(String(parseInt(ra.replace(/\D/g, '').slice(-9)))).toString('base64');
+
+    const response = await axios.post('https://edusp-api.ip.tv/registration/edusp', 
+      { realm: "edusp", platform: "webclient", id: `${ra}sp`, password: senha },
+      { 
+        headers: { 
+            'x-client-timestamp': timestamp,
+            'x-client-signature': signature,
+            'x-client-domain': 'taskitos.cupiditys.lol',
+            'origin': 'https://taskitos.cupiditys.lol',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+        } 
+      }
+    );
+    // A resposta do login do Taskitos contém o token e o userId que precisamos
+    res.status(200).json(response.data);
+  } catch (error) {
+    res.status(error.response?.status || 500).json({ error: 'Falha no login (método Taskitos)', details: error.response?.data });
+  }
 });
 
-// Rota de Turmas (SEDUC)
-app.get('/api/turmas', async (req, res) => {
-    const { codigoAluno } = req.query;
-    if (!codigoAluno) return res.status(400).json({ message: 'Código do aluno é obrigatório.' });
-    try {
-        const response = await axios.get(`${SED_API_URL}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, 
-            { headers: { 'Ocp-Apim-Subscription-Key': TURMAS_API_KEY } }
-        );
-        res.json(response.data);
-    } catch (error) {
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao buscar turmas.' });
-    }
-});
-
-// ROTA CORRIGIDA: Troca o token de login pela chave da API EDUSP
-app.post('/api/edusp-token', async (req, res) => {
-    const { loginToken } = req.body;
-    if (!loginToken) return res.status(400).json({ message: 'Token de login é obrigatório.' });
-    try {
-        console.log('[LOG] Trocando token de login pela chave da API EDUSP...');
-        const response = await axios.post(`${EDUSP_API_URL}/registration/edusp/token`, 
-            { token: loginToken },
-            {
-                // CORREÇÃO: Adicionados os cabeçalhos que faltavam para a requisição ser aceita.
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-realm': 'edusp',
-                    'x-api-platform': 'webclient'
-                }
-            }
-        );
-        console.log('[LOG] Chave da API EDUSP recebida com sucesso.');
-        res.json(response.data);
-    } catch (error) {
-        console.error('[ERRO] Falha ao obter a chave da API EDUSP:', error.response?.data || error.message);
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro no proxy ao obter chave EDUSP.' });
-    }
-});
-
-// Rota de Tarefas (EDUSP)
+// ROTA DE TAREFAS (MÉTODO TASKITOS)
 app.post('/api/tarefas', async (req, res) => {
-    const { apiKey, turmas, nickname } = req.body;
-    if (!apiKey || !turmas) return res.status(400).json({ message: 'Chave de API e lista de turmas são obrigatórias.' });
-
-    const publicationTargets = new URLSearchParams();
-    const uniqueTargets = new Set();
-
-    turmas.forEach(turma => {
-        if (turma.id) uniqueTargets.add(turma.id);
-        if (turma.codigo) uniqueTargets.add(turma.codigo);
-        if (turma.turmaId) uniqueTargets.add(turma.turmaId);
-        if (turma.id && nickname) uniqueTargets.add(`${turma.id}:${nickname}`);
-    });
-
-    uniqueTargets.forEach(target => publicationTargets.append('publication_target', target));
-
-    const queryString = `expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false&${publicationTargets.toString()}&with_apply_moment=true`;
-    const fullUrl = `${EDUSP_API_URL}/tms/task/todo?${queryString}`;
-    
-    console.log(`[LOG] Buscando tarefas com URL: ${fullUrl}`);
+    const { token, userId } = req.body;
+    if (!token || !userId) return res.status(400).json({ error: 'Token e UserID são necessários.' });
 
     try {
-        const response = await axios.get(fullUrl, {
+        // --- PASSO 1: Obter a lista de "salas" (turmas) do usuário ---
+        const timestamp1 = Date.now();
+        const signature1 = generateSignature(timestamp1, userId);
+        
+        const roomsResponse = await axios.get('https://edusp-api.ip.tv/room/user', {
             headers: {
-                'accept': 'application/json',
-                'x-api-key': apiKey,
-                'x-api-realm': 'edusp',
-                'x-api-platform': 'webclient'
+                'x-api-key': token,
+                'x-client-timestamp': timestamp1,
+                'x-client-signature': signature1,
+                'x-client-domain': 'taskitos.cupiditys.lol',
+                'origin': 'https://taskitos.cupiditys.lol',
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
             }
         });
-        res.json(response.data);
+        
+        const rooms = roomsResponse.data.items;
+        if (!rooms || rooms.length === 0) {
+            return res.status(200).json({ items: [] });
+        }
+
+        // --- PASSO 2: Buscar as tarefas para cada sala ---
+        const publicationTargets = rooms.map(room => `publication_target[]=${room.id}`).join('&');
+        const urlTarefas = `https://edusp-api.ip.tv/tms/task/todo?expired_only=false&is_essay=false&is_exam=false&answer_statuses=draft&answer_statuses=pending&with_answer=true&with_apply_moment=true&limit=100&filter_expired=true&offset=0&${publicationTargets}`;
+
+        const timestamp2 = Date.now();
+        const signature2 = generateSignature(timestamp2, userId);
+
+        const tarefasResponse = await axios.get(urlTarefas, {
+            headers: {
+                'x-api-key': token,
+                'x-client-timestamp': timestamp2,
+                'x-client-signature': signature2,
+                'x-client-domain': 'taskitos.cupiditys.lol',
+                'origin': 'https://taskitos.cupiditys.lol',
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+            }
+        });
+
+        res.status(200).json(tarefasResponse.data);
+
     } catch (error) {
-        console.error('[ERRO] Falha ao buscar tarefas:', error.response?.data || error.message);
-        res.status(error.response?.status || 500).json(error.response?.data || { message: 'Erro ao buscar tarefas no servidor proxy.' });
+        res.status(error.response?.status || 500).json({ error: 'Falha ao buscar tarefas pelo método Taskitos.', details: error.response?.data });
     }
 });
 
-app.listen(PORT, () => console.log(`Servidor proxy rodando na porta ${PORT}`));
+// ROTA PARA RESOLVER TAREFA COM GEMINI
+app.post('/api/resolver-tarefa', async (req, res) => {
+    const { prompt, apiKey } = req.body;
+    if (!prompt || !apiKey) {
+        return res.status(400).json({ error: 'Prompt e Chave de API são necessários.' });
+    }
+    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+    try {
+        const response = await axios.post(GEMINI_API_URL, {
+            contents: [{ parts: [{ text: `Por favor, responda a seguinte questão acadêmica de forma clara e completa, como se fosse para um trabalho escolar. Questão: "${prompt}"` }] }]
+        }, { headers: { 'Content-Type': 'application/json' } });
+        const text = response.data.candidates[0].content.parts[0].text;
+        res.status(200).json({ answer: text });
+    } catch (error) {
+        res.status(500).json({ error: 'Falha ao comunicar com a IA.', details: error.response?.data?.error?.message });
+    }
+});
+
+module.exports = app;
 
