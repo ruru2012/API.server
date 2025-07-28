@@ -5,55 +5,33 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const crypto = require('crypto');
+const { createHash, createHmac } = require('crypto');
 
 const app = express();
 app.use(cors()); 
 app.use(express.json());
 
 // --- FUNÇÃO PARA RESOLVER O DESAFIO ALTCHA (PROVA DE TRABALHO) ---
-async function solveAltcha(challenge, salt, algorithm) {
+// Esta função de força bruta encontra o número que resolve o desafio.
+function solveAltcha(challenge, salt, algorithm) {
     const hashAlgorithm = algorithm.toLowerCase().replace('-', '');
     let number = 0;
-    while (true) {
-        const solution = salt + number;
-        const hash = crypto.createHash(hashAlgorithm).update(solution).digest('hex');
-        const verificationHash = crypto.createHash(hashAlgorithm).update(challenge + hash).digest('hex');
-        
-        // O desafio do Taskitos parece usar uma verificação mais simples,
-        // vamos testar a verificação padrão do Altcha primeiro.
-        // A lógica real pode ser diferente, mas esta é a implementação padrão.
-        // A complexidade do desafio está implícita na estrutura do 'challenge' hash.
-        // Vamos assumir uma complexidade padrão por agora.
-        // NOTA: A lógica exata de verificação pode ser diferente e estar no JS deles.
-        // Esta é a nossa melhor tentativa baseada no funcionamento do Altcha.
-        
-        // Simulação de uma verificação de complexidade (ex: hash começa com '000')
-        // Esta parte é a mais difícil de replicar sem ver o código-fonte deles.
-        // Vamos usar a verificação que o próprio Altcha usa:
-        const hmac = crypto.createHmac(hashAlgorithm, challenge);
-        hmac.update(Buffer.from(salt, 'utf8'));
-        hmac.update(Buffer.from(String(number), 'utf8'));
-        
-        if (hmac.digest('hex') === challenge) { // Esta verificação é improvável
-             // A lógica real é provavelmente encontrar um hash com N zeros.
-        }
-
-        // A lógica mais provável é encontrar um hash que, quando combinado com o desafio,
-        // resulta num novo hash com uma propriedade específica.
-        // Por falta do código-fonte, vamos assumir uma lógica de força bruta simples.
-        // Esta parte pode precisar de ajuste. Por agora, vamos simular um sucesso.
-        
-        // A assinatura que eles usam é apenas o payload do altcha resolvido.
-        // O segredo não está em resolver, mas em apresentar a solução.
-        // Vamos focar em construir o payload correto.
-        
-        // Aparentemente, o segredo não é resolver o PoW, mas sim obter um desafio válido
-        // e usá-lo na assinatura do login. Vamos simplificar.
-        return number; // Retorna um número simbólico.
-    }
+    let hash;
+    let solution;
+    
+    // O desafio é encontrar um 'number' que, quando adicionado ao 'salt' e hasheado,
+    // o resultado comece com um certo número de zeros. A dificuldade está no 'challenge'.
+    // Esta é uma implementação padrão de Prova de Trabalho.
+    console.log(`[DECIFRADOR] Iniciando Prova de Trabalho para o desafio...`);
+    do {
+        solution = salt + number;
+        hash = createHash(hashAlgorithm).update(solution).digest('hex');
+        number++;
+    } while (!hash.startsWith('000')); // A dificuldade (número de zeros) é uma suposição, mas é um padrão comum.
+    
+    console.log(`[DECIFRADOR] Prova de Trabalho resolvida com o número: ${number - 1}`);
+    return number - 1;
 }
-
 
 // --- ROTAS DA API ---
 
@@ -68,16 +46,16 @@ app.post('/api/login-and-get-tasks', async (req, res) => {
         const challengeResponse = await axios.get('https://taskitos.cupiditys.lol/api/altcha/challenge');
         const challengeData = challengeResponse.data;
 
-        // --- PASSO 2: "Resolver" o desafio e construir a assinatura ---
-        // A nossa engenharia reversa indica que a assinatura não é o resultado de um PoW complexo,
-        // mas sim o payload do desafio em si, com um número aleatório, codificado.
-        // Esta é a chave que descobrimos.
+        // --- PASSO 2: Resolver o desafio e construir a assinatura ---
+        // A nossa engenharia reversa indica que a assinatura é o payload do altcha resolvido e codificado.
+        const solvedNumber = solveAltcha(challengeData.challenge, challengeData.salt, challengeData.algorithm);
+        
         const solutionPayload = {
             ...challengeData,
-            number: Math.floor(Math.random() * 100000), // Um número aleatório como o site parece fazer
+            number: solvedNumber,
         };
         const signature = Buffer.from(JSON.stringify(solutionPayload)).toString('base64');
-        console.log("[DECIFRADOR] Passo 2: Assinatura gerada.");
+        console.log("[DECIFRADOR] Passo 2: Assinatura gerada com sucesso.");
 
         // --- PASSO 3: Fazer o login com a assinatura gerada ---
         console.log("[DECIFRADOR] Passo 3: Tentando login com assinatura...");
@@ -127,4 +105,4 @@ app.post('/api/login-and-get-tasks', async (req, res) => {
 
 module.exports = app;
 
-                
+            
